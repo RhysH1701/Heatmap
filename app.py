@@ -59,7 +59,7 @@ with col_hero_left:
     st.markdown('<div class="subtitle">Interactive scouting and efficiency analysis tool</div>', unsafe_allow_html=True)
 with col_hero_right:
     st.markdown("#### ")
-    st.markdown("**Version** 0.1.0  ")
+    st.markdown("**Version** 0.1.5  ")
     st.markdown(f"**Updated** {datetime.now().date()}  ")
     st.markdown("**Theme** Light")
 
