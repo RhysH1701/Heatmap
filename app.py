@@ -198,6 +198,37 @@ if "__DATASET__" in df_raw.columns:
         st.warning("No datasets selected.")
         st.stop()
 
+# --- Tag datasets (perspective + teams) ---
+if "__DATASET__" in df_raw.columns:
+    if "dataset_tags" not in st.session_state:
+        st.session_state["dataset_tags"] = {}  # { dataset_name: {"perspective":..., "us":..., "them":...} }
+
+    with st.sidebar.expander("Tag datasets"):
+        for ds in sorted(df_raw["__DATASET__"].dropna().unique()):
+            current = st.session_state["dataset_tags"].get(ds, {"perspective": "Unlabeled", "us": "", "them": ""})
+            st.markdown(f"**{ds}**")
+            perspective = st.selectbox(
+                f"Perspective – {ds}",
+                ["Unlabeled", "Our Offense vs Them", "Their Offense vs Our Defense"],
+                index=["Unlabeled", "Our Offense vs Them", "Their Offense vs Our Defense"].index(current["perspective"]),
+                key=f"persp_{ds}",
+            )
+            us_team = st.text_input(f"Our team – {ds}", value=current["us"], key=f"us_{ds}")
+            them_team = st.text_input(f"Opponent – {ds}", value=current["them"], key=f"them_{ds}")
+
+            # persist in session
+            st.session_state["dataset_tags"][ds] = {"perspective": perspective, "us": us_team, "them": them_team}
+
+    # Apply tags to the rows of df_raw (auto each run)
+    tag_map = st.session_state.get("dataset_tags", {})
+    def _get(ds, key, default):
+        return tag_map.get(ds, {}).get(key, default)
+
+    df_raw["__PERSPECTIVE__"] = df_raw["__DATASET__"].map(lambda d: _get(d, "perspective", "Unlabeled"))
+    df_raw["__US_TEAM__"]     = df_raw["__DATASET__"].map(lambda d: _get(d, "us", ""))
+    df_raw["__OPP_TEAM__"]    = df_raw["__DATASET__"].map(lambda d: _get(d, "them", ""))
+
+
 # ----------------------------
 # Defensive normalization
 # ----------------------------
@@ -286,6 +317,60 @@ for label in ["PERSONNEL", "FORMATION", "HASH", "QB", "TARGET"]:
         sel = st.sidebar.selectbox(label.title(), vals, index=0)
         if sel != "All":
             filtered = filtered[filtered[colname] == sel]
+
+# ---filters by dataset tags ---
+if "__PERSPECTIVE__" in df_raw.columns:
+    choices = ["Our Offense vs Them", "Their Offense vs Our Defense", "Unlabeled"]
+    pick_persp = st.sidebar.multiselect("Perspective", choices, default=choices[:2])
+    if pick_persp:
+        filtered = filtered[filtered["__PERSPECTIVE__"].isin(pick_persp)]
+
+if "__US_TEAM__" in df_raw.columns and df_raw["__US_TEAM__"].notna().any():
+    our_teams = ["All"] + sorted([x for x in df_raw["__US_TEAM__"].dropna().unique().tolist() if str(x).strip() != ""])
+    sel_us = st.sidebar.selectbox("Our Team", our_teams, index=0)
+    if sel_us != "All":
+        filtered = filtered[filtered["__US_TEAM__"] == sel_us]
+
+if "__OPP_TEAM__" in df_raw.columns and df_raw["__OPP_TEAM__"].notna().any():
+    opp_teams = ["All"] + sorted([x for x in df_raw["__OPP_TEAM__"].dropna().unique().tolist() if str(x).strip() != ""])
+    sel_them = st.sidebar.selectbox("Opponent Team", opp_teams, index=0)
+    if sel_them != "All":
+        filtered = filtered[filtered["__OPP_TEAM__"] == sel_them]
+
+# --- Data library (session) ---
+if "library_df" not in st.session_state:
+    st.session_state["library_df"] = pd.DataFrame()
+
+with st.sidebar.expander("Data library"):
+    store_pass_only = st.checkbox("Store pass plays only", value=True)
+    add_to_lib = st.button("Add selected data to library")
+    lib_csv = st.file_uploader("Load library CSV", type=["csv"], key="lib_csv_loader")
+    clear_lib = st.button("Clear library")
+
+    if add_to_lib:
+        to_add = pass_df.copy() if store_pass_only else df_raw.copy()
+        st.session_state["library_df"] = pd.concat([st.session_state["library_df"], to_add], ignore_index=True)
+        st.success(f"Added {len(to_add)} rows. Library total: {len(st.session_state['library_df'])}")
+
+    if lib_csv is not None:
+        try:
+            st.session_state["library_df"] = pd.read_csv(lib_csv)
+            st.success(f"Loaded library: {len(st.session_state['library_df'])} rows")
+        except Exception as e:
+            st.error(f"Could not read CSV: {e}")
+
+    if clear_lib and len(st.session_state["library_df"]) > 0:
+        st.session_state["library_df"] = pd.DataFrame()
+        st.info("Library cleared.")
+
+    if len(st.session_state["library_df"]) > 0:
+        st.download_button(
+            "Download library CSV",
+            data=st.session_state["library_df"].to_csv(index=False).encode("utf-8"),
+            file_name="scout_library.csv",
+            mime="text/csv",
+        )
+
 
 # ----------------------------
 # KPIs
