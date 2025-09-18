@@ -1,4 +1,5 @@
 import io
+import zipfile
 from datetime import datetime
 
 import matplotlib.pyplot as plt
@@ -59,7 +60,7 @@ with col_hero_left:
     st.markdown('<div class="subtitle">Interactive scouting and efficiency analysis tool</div>', unsafe_allow_html=True)
 with col_hero_right:
     st.markdown("#### ")
-    st.markdown("**Version** 0.1.5  ")
+    st.markdown("**Version** 0.1.0  ")
     st.markdown(f"**Updated** {datetime.now().date()}  ")
     st.markdown("**Theme** Light")
 
@@ -69,7 +70,12 @@ st.markdown("<div class='soft-divider'></div>", unsafe_allow_html=True)
 # Sidebar Controls
 # ----------------------------
 st.sidebar.header("Upload & Filters")
-uploaded = st.sidebar.file_uploader("Upload Excel (.xlsx)", type=["xlsx"]) 
+uploaded_files = st.sidebar.file_uploader(
+    "Upload files (.xlsx, .xls, .csv, or .zip)",
+    type=["xlsx", "xls", "csv", "zip"],
+    accept_multiple_files=True,
+)
+st.sidebar.caption("Tip: Hold Ctrl (Windows) / Cmd (Mac) to pick multiple files, or drag them all at once. On mobile, multi-select may not be supported — upload a .zip instead.")
 
 example_note = st.sidebar.expander("Data schema (minimum)", expanded=False)
 with example_note:
@@ -91,16 +97,64 @@ heatmap_metric = st.sidebar.selectbox("Heatmap color by", ["Completions", "Attem
 # Data Load
 # ----------------------------
 @st.cache_data(show_spinner=False)
-def load_excel(file: bytes) -> pd.DataFrame:
-    try:
-        df = pd.read_excel(file, engine="openpyxl")
-    except Exception:
-        df = pd.read_excel(file)
-    df.columns = [c.strip() for c in df.columns]
-    return df
+def load_any(file_bytes: bytes, filename: str) -> list[pd.DataFrame]:
+    """Load one uploaded item (xlsx/xls/csv/zip) and return list of DataFrames.
+    Adds a __DATASET__ column derived from filename/member name.
+    """
+    name_lower = filename.lower()
+    out: list[pd.DataFrame] = []
 
-if uploaded is None:
-    st.info("Upload a dataset to begin. Or toggle demo mode below.")
+    def _standardize(df: pd.DataFrame, tag: str) -> pd.DataFrame:
+        df = df.copy()
+        df.columns = [c.strip() for c in df.columns]
+        df["__DATASET__"] = tag
+        return df
+
+    bio = io.BytesIO(file_bytes)
+
+    if name_lower.endswith(".csv"):
+        df = pd.read_csv(bio)
+        out.append(_standardize(df, filename))
+    elif name_lower.endswith((".xlsx", ".xls")):
+        try:
+            df = pd.read_excel(bio, engine="openpyxl")  # for .xlsx
+        except Exception:
+            bio.seek(0)
+            df = pd.read_excel(bio)  # fallback (may work for .xls if engine available)
+        out.append(_standardize(df, filename))
+    elif name_lower.endswith(".zip"):
+        with zipfile.ZipFile(bio) as zf:
+            for member in zf.namelist():
+                if member.lower().endswith(".csv"):
+                    with zf.open(member) as f:
+                        df = pd.read_csv(f)
+                        out.append(_standardize(df, f"{filename}:{member}"))
+                elif member.lower().endswith((".xlsx", ".xls")):
+                    with zf.open(member) as f:
+                        data = f.read()
+                        mbio = io.BytesIO(data)
+                        try:
+                            df = pd.read_excel(mbio, engine="openpyxl")
+                        except Exception:
+                            mbio.seek(0)
+                            df = pd.read_excel(mbio)
+                        out.append(_standardize(df, f"{filename}:{member}"))
+    else:
+        # Unknown extension — try CSV then Excel fallback
+        try:
+            bio.seek(0)
+            df = pd.read_csv(bio)
+            out.append(_standardize(df, filename))
+        except Exception:
+            bio.seek(0)
+            df = pd.read_excel(bio)
+            out.append(_standardize(df, filename))
+
+    return out
+
+# Load one or more files
+if not uploaded_files:
+    st.info("Upload one or more datasets to begin. Or toggle demo mode below.")
     if st.checkbox("Use demo data"):
         demo = pd.DataFrame({
             "PLAY TYPE": ["Pass", "Pass", "Pass", "Run", "Pass", "Pass", "Pass"],
@@ -114,11 +168,35 @@ if uploaded is None:
             "QB": ["QB1", "QB1", "QB1", "QB1", "QB1", "QB1", "QB1"],
             "TARGET": ["WR1", "TE1", "WR2", "RB1", "WR1", "RB1", "WR3"],
         })
+        demo["__DATASET__"] = "DEMO"
         df_raw = demo
     else:
         st.stop()
 else:
-    df_raw = load_excel(uploaded)
+    frames = []
+    for i, f in enumerate(uploaded_files):
+        try:
+            bytes_data = f.read()
+        finally:
+            f.seek(0)
+        loaded_frames = load_any(bytes_data, getattr(f, "name", f"Dataset {i+1}"))
+        frames.extend(loaded_frames)
+    if len(frames) == 0:
+        st.error("No readable files found. Ensure they are .xlsx, .xls, .csv or a .zip containing those.")
+        st.stop()
+    df_raw = pd.concat(frames, ignore_index=True)
+
+# ----------------------------
+# Dataset filter (choose which uploaded datasets to include)
+# ----------------------------
+if "__DATASET__" in df_raw.columns:
+    ds_all = sorted(df_raw["__DATASET__"].dropna().unique().tolist())
+    sel_ds = st.sidebar.multiselect("Datasets", ds_all, default=ds_all)
+    if sel_ds:
+        df_raw = df_raw[df_raw["__DATASET__"].isin(sel_ds)]
+    else:
+        st.warning("No datasets selected.")
+        st.stop()
 
 # ----------------------------
 # Defensive normalization
@@ -215,7 +293,6 @@ for label in ["PERSONNEL", "FORMATION", "HASH", "QB", "TARGET"]:
 result_series = filtered[COL_RESULT].astype(str).str.upper()
 att = len(filtered)
 comp = int((result_series == "COMPLETE").sum())
-inc = int((result_series == "INCOMPLETE").sum())
 ints = int((result_series.str.contains("INT")).sum())
 comp_pct = (comp / att) * 100 if att > 0 else 0.0
 avg_yards = float(
@@ -249,7 +326,7 @@ with c5:
 st.markdown("<div class='soft-divider'></div>", unsafe_allow_html=True)
 
 # ----------------------------
-# Precompute zone stats and drawing function
+# Zone stats & heatmap
 # ----------------------------
 zone_stats = filtered.groupby("ZONE").agg(
     attempts=(COL_RESULT, "count"),
@@ -260,6 +337,8 @@ zone_stats["success_rate"] = np.where(zone_stats["attempts"] > 0,
 
 max_completions = zone_stats["completions"].max() if len(zone_stats) else 1
 max_attempts = zone_stats["attempts"].max() if len(zone_stats) else 1
+
+ZONE_MAP_CANVAS = ZONE_MAP_CANVAS  # keep mapping name
 
 
 def draw_heatmap(metric: str) -> plt.Figure:
@@ -299,7 +378,7 @@ def draw_heatmap(metric: str) -> plt.Figure:
     return fig
 
 # ----------------------------
-# View Switcher (replaces non-functional badges)
+# View Switcher
 # ----------------------------
 view = st.radio("View", ["Heatmap", "Table", "Breakdowns", "Exports"], index=0, horizontal=True)
 
@@ -352,6 +431,20 @@ elif view == "Breakdowns":
 
     st.markdown("<div class='soft-divider'></div>", unsafe_allow_html=True)
 
+    # Per-dataset summary
+    if "__DATASET__" in filtered.columns:
+        st.subheader("Per-Dataset Summary")
+        grp = filtered.copy()
+        grp["_complete"] = (grp[COL_RESULT].astype(str).str.upper() == "COMPLETE").astype(int)
+        summ = grp.groupby("__DATASET__").agg(
+            Attempts=(COL_RESULT, "count"),
+            Completions=("_complete", "sum")
+        )
+        summ["Completion %"] = np.where(summ["Attempts"] > 0, (summ["Completions"] / summ["Attempts"]) * 100, np.nan)
+        if opt_cols["YARDS"]:
+            summ["Yards/Att"] = pd.to_numeric(grp[opt_cols["YARDS"]], errors="coerce").groupby(grp["__DATASET__"]).mean()
+        st.dataframe(summ)
+
     if opt_cols["DOWN"] and opt_cols["DISTANCE"]:
         st.subheader("Situational – Down & Distance")
         situ = filtered.copy()
@@ -373,7 +466,7 @@ elif view == "Exports":
     fig.savefig(buf, format='png', dpi=200, bbox_inches='tight')
     st.download_button("Download Heatmap PNG", data=buf.getvalue(), file_name="heatmap.png", mime="image/png")
 
-    # Zone table CSV (recompute to keep this block self-contained)
+    # Zone table CSV
     if len(filtered) == 0:
         st.info("No rows after filters to export.")
     else:
@@ -405,4 +498,5 @@ elif view == "Exports":
 # ----------------------------
 st.markdown("<div class='soft-divider'></div>", unsafe_allow_html=True)
 st.subheader("Raw (Filtered) Data")
-st.dataframe(filtered, use_container_width=True)
+display_df = filtered.rename(columns={"__DATASET__": "Dataset"})
+st.dataframe(display_df, use_container_width=True)
